@@ -1,0 +1,31 @@
+[package]
+name = "vmem"
+version = "0.1.0"
+edition = "2024"
+description = "Read/write another process's memory and resolve multi-level pointer chains (Linux)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/jirubizu/vmem"
+readme = "README.md"
+keywords = ["memory", "ptrace", "process", "linux", "gamehacking"]
+categories = [
+  "os::linux-apis",
+  "memory-management",
+  "development-tools::debugging",
+]
+
+[dependencies]
+libc = "0.2"
+bytemuck = { version = "1", features = ["derive"] }
+thiserror = "1"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
+[[example]]
+name = "patch"
+path = "examples/patch.rs"
+
+[[example]]
+name = "inject"
+path = "examples/inject.rs"
