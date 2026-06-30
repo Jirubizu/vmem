@@ -1155,8 +1155,24 @@ impl Process {
         if !region.readable() || pattern.is_empty() {
             return Ok(None);
         }
+        self.scan_chunks(region, pattern.len(), |base, window| {
+            pattern.first_match(window).map(|off| base + off)
+        })
+    }
+
+    /// Walk a readable region in overlapping 1 MiB chunks, invoking
+    /// `on_window(base_addr, &window)` for each. The window carries the trailing
+    /// `plen - 1` bytes of the previous chunk so a match straddling a chunk
+    /// boundary is seen whole. Unreadable sub-ranges are skipped (treated as
+    /// holes). The walk stops early and returns the value if a callback yields
+    /// `Some`.
+    fn scan_chunks(
+        &self,
+        region: &MapRegion,
+        plen: usize,
+        mut on_window: impl FnMut(usize, &[u8]) -> Option<usize>,
+    ) -> Result<Option<usize>> {
         const CHUNK: usize = 1 << 20; // 1 MiB
-        let plen = pattern.len();
         let mut pos = region.start;
         let mut carry: Vec<u8> = Vec::new();
         let mut carry_addr = region.start;
@@ -1179,8 +1195,8 @@ impl Process {
             let base_addr = carry_addr;
             window.append(&mut buf);
 
-            if let Some(off) = pattern.first_match(&window) {
-                return Ok(Some(base_addr + off));
+            if let Some(hit) = on_window(base_addr, &window) {
+                return Ok(Some(hit));
             }
 
             // keep the last plen-1 bytes to catch a boundary-straddling match
@@ -1254,37 +1270,13 @@ impl Process {
         if !region.readable() || pattern.is_empty() {
             return Ok(Vec::new());
         }
-        const CHUNK: usize = 1 << 20;
-        let plen = pattern.len();
         let mut hits = Vec::new();
-        let mut pos = region.start;
-        let mut carry: Vec<u8> = Vec::new();
-        let mut carry_addr = region.start;
-
-        while pos < region.end {
-            let want = CHUNK.min(region.end - pos);
-            let buf = match self.read_vec(pos, want) {
-                Ok(b) => b,
-                Err(Error::Unmapped { .. }) | Err(Error::Partial { .. }) => {
-                    carry.clear();
-                    pos += want;
-                    carry_addr = pos;
-                    continue;
-                }
-                Err(e) => return Err(e),
-            };
-            let mut window = std::mem::take(&mut carry);
-            let base_addr = carry_addr;
-            window.extend_from_slice(&buf);
-
-            for off in pattern.all_matches(&window) {
-                hits.push(base_addr + off);
+        self.scan_chunks(region, pattern.len(), |base, window| {
+            for off in pattern.all_matches(window) {
+                hits.push(base + off);
             }
-            let keep = plen.saturating_sub(1).min(window.len());
-            carry_addr = base_addr + (window.len() - keep);
-            carry = window[window.len() - keep..].to_vec();
-            pos += want;
-        }
+            None
+        })?;
         hits.sort_unstable();
         hits.dedup();
         Ok(hits)
@@ -1810,5 +1802,54 @@ mod tests {
             u64::from_le_bytes(code[6..14].try_into().unwrap()),
             to as u64
         );
+    }
+
+    #[test]
+    fn scan_region_finds_known_needle() {
+        let me = Process::by_pid(std::process::id() as i32).unwrap();
+        let mut data = vec![0xABu8; 64 * 1024];
+        let needle = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let at = 40_000;
+        data[at..at + needle.len()].copy_from_slice(&needle);
+        let addr = data.as_ptr() as usize;
+        let region = me
+            .maps()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.start <= addr && addr + data.len() <= r.end)
+            .expect("a mapped region containing the buffer");
+        let pat = Pattern::parse("11 22 33 44 55 66 77 88").unwrap();
+        let all = me.scan_region_all(&region, &pat).unwrap();
+        assert!(all.contains(&(addr + at)));
+        // first match is the lowest hit address
+        assert_eq!(me.scan_region(&region, &pat).unwrap(), all.first().copied());
+    }
+
+    #[test]
+    fn scan_region_all_spans_chunk_boundaries() {
+        // Exercises the >1 MiB multi-chunk path and the carry that catches a
+        // match straddling a chunk boundary.
+        let me = Process::by_pid(std::process::id() as i32).unwrap();
+        const MB: usize = 1 << 20;
+        let size = 2 * MB + 8192;
+        let mut data = vec![0xABu8; size];
+        let needle = [0x11u8, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88];
+        let offsets = [64usize, MB - 3, MB + 64, 2 * MB - 5];
+        for &o in &offsets {
+            data[o..o + needle.len()].copy_from_slice(&needle);
+        }
+        let addr = data.as_ptr() as usize;
+        let region = me
+            .maps()
+            .unwrap()
+            .into_iter()
+            .find(|r| r.start <= addr && addr + size <= r.end)
+            .expect("a mapped region containing the buffer");
+        let pat = Pattern::parse("11 22 33 44 55 66 77 88").unwrap();
+        let all = me.scan_region_all(&region, &pat).unwrap();
+        for &o in &offsets {
+            assert!(all.contains(&(addr + o)), "missing needle at +{o:#x}");
+        }
+        assert_eq!(me.scan_region(&region, &pat).unwrap(), all.first().copied());
     }
 }
