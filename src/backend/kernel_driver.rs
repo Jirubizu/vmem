@@ -1,0 +1,117 @@
+//! Thin ioctl client for the `/dev/vmem` kernel module.
+//!
+//! The [`VmemIo`] layout and the `VMEM_RW` ioctl number are the ABI contract
+//! with the module (`kmod/vmem_main.rs`); they MUST match byte for byte.
+
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
+
+use crate::{Error, Result};
+
+/// ioctl request payload. `#[repr(C)]`; field order and size are the ABI.
+#[repr(C)]
+struct VmemIo {
+    pid: i32,
+    write: u32, // 0 = read, 1 = write
+    addr: u64,
+    len: u64,
+    ubuf: u64, // userspace pointer to the data buffer
+}
+
+/// `_IOWR('V', nr, struct vmem_io)` — Linux asm-generic ioctl encoding.
+const fn iowr(nr: u32, size: usize) -> libc::c_ulong {
+    ((3u32 << 30) | ((b'V' as u32) << 8) | nr | ((size as u32) << 16)) as libc::c_ulong
+}
+
+const VMEM_RW: libc::c_ulong = iowr(0, std::mem::size_of::<VmemIo>());
+
+/// Maximum bytes per ioctl; larger transfers are chunked. Matches the module's
+/// cap, so a single request never allocates an unbounded kernel bounce buffer.
+const MAX_LEN: usize = 1 << 20;
+
+/// An open handle to the `/dev/vmem` char device.
+pub(crate) struct KernelDriver {
+    file: File,
+}
+
+impl KernelDriver {
+    /// Open the device, or fail (so the caller can fall back to syscalls).
+    pub(crate) fn open(path: &str) -> std::io::Result<Self> {
+        Ok(Self {
+            file: OpenOptions::new().read(true).write(true).open(path)?,
+        })
+    }
+
+    /// One `VMEM_RW` ioctl over a `<= MAX_LEN` slice. Returns bytes moved.
+    fn ioctl_once(&self, pid: i32, addr: usize, ptr: *mut u8, len: usize, write: bool) -> isize {
+        let mut req = VmemIo {
+            pid,
+            write: u32::from(write),
+            addr: addr as u64,
+            len: len as u64,
+            ubuf: ptr as u64,
+        };
+        // SAFETY: `self.file` is a live O_RDWR handle to /dev/vmem; `req`
+        // outlives the call; `ptr` is valid for `len` bytes (mut on read,
+        // shared on write) as guaranteed by `rw`'s callers.
+        unsafe { libc::ioctl(self.file.as_raw_fd(), VMEM_RW, &mut req) as isize }
+    }
+
+    /// Transfer `len` bytes, chunking at `MAX_LEN`. Mirrors the syscall path's
+    /// error contract: [`Error::Partial`] once any bytes have moved, otherwise
+    /// a classified error.
+    fn rw(&self, pid: i32, addr: usize, ptr: *mut u8, len: usize, write: bool) -> Result<()> {
+        let mut done = 0usize;
+        while done < len {
+            let chunk = (len - done).min(MAX_LEN);
+            // SAFETY: `done < len` and the buffer is valid for `len` bytes, so
+            // `ptr + done` stays in bounds.
+            let n = self.ioctl_once(pid, addr + done, unsafe { ptr.add(done) }, chunk, write);
+            if n < 0 {
+                if done > 0 {
+                    return Err(Error::Partial {
+                        addr,
+                        wanted: len,
+                        moved: done,
+                    });
+                }
+                return Err(classify(pid, addr, len, errno()));
+            }
+            let moved = n as usize;
+            done += moved;
+            if moved != chunk {
+                return Err(Error::Partial {
+                    addr,
+                    wanted: len,
+                    moved: done,
+                });
+            }
+        }
+        Ok(())
+    }
+
+    /// Read `buf.len()` bytes from the target's `addr` into `buf`.
+    pub(crate) fn read(&self, pid: i32, addr: usize, buf: &mut [u8]) -> Result<()> {
+        self.rw(pid, addr, buf.as_mut_ptr(), buf.len(), false)
+    }
+
+    /// Write `buf` to the target's `addr` (read-only pages included).
+    pub(crate) fn write(&self, pid: i32, addr: usize, buf: &[u8]) -> Result<()> {
+        // The module only reads from this buffer on a write op.
+        self.rw(pid, addr, buf.as_ptr().cast_mut(), buf.len(), true)
+    }
+}
+
+/// Map a kernel `errno` onto the crate's `Error`, matching `Process::classify`
+/// (`src/lib.rs`) so callers cannot tell the backends apart.
+fn classify(pid: i32, addr: usize, len: usize, e: i32) -> Error {
+    match e {
+        libc::EPERM | libc::EACCES => Error::Permission { pid },
+        libc::EFAULT | libc::ENOMEM | libc::EIO | libc::ESRCH => Error::Unmapped { addr, len },
+        other => Error::Io(std::io::Error::from_raw_os_error(other)),
+    }
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}

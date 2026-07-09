@@ -18,6 +18,10 @@ libc = "0.2"
 bytemuck = { version = "1", features = ["derive"] }
 thiserror = "1"
 
+[features]
+# Off by default: without it the crate is byte-for-byte the userspace crate.
+kernel = []
+
 [[example]]
 name = "demo"
 path = "examples/demo.rs"
@@ -29,3 +33,7 @@ path = "examples/patch.rs"
 [[example]]
 name = "inject"
 path = "examples/inject.rs"
+
+[[example]]
+name = "kernel_ab"
+path = "examples/kernel_ab.rs"

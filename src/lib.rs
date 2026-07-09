@@ -65,6 +65,8 @@
 #![warn(missing_debug_implementations)]
 
 mod asm;
+#[cfg(feature = "kernel")]
+mod backend;
 mod inject;
 pub use asm::{Asm, AsmError, Reg};
 pub use inject::{Hook, RemoteMem, prot};
@@ -513,6 +515,10 @@ impl Process {
         if buf.is_empty() {
             return Ok(());
         }
+        #[cfg(feature = "kernel")]
+        if let backend::Backend::Kernel(d) = backend::backend() {
+            return d.read(self.pid, addr, buf);
+        }
         let local = libc::iovec {
             iov_base: buf.as_mut_ptr().cast(),
             iov_len: buf.len(),
@@ -559,6 +565,10 @@ impl Process {
     pub fn write_bytes(&self, addr: usize, buf: &[u8]) -> Result<()> {
         if buf.is_empty() {
             return Ok(());
+        }
+        #[cfg(feature = "kernel")]
+        if let backend::Backend::Kernel(d) = backend::backend() {
+            return d.write(self.pid, addr, buf);
         }
         let local = libc::iovec {
             iov_base: buf.as_ptr() as *mut _,
@@ -953,6 +963,14 @@ impl<'p> Scatter<'p> {
     /// Because the kernel reports only a total byte count, a partial transfer
     /// cannot be attributed to an exact slot.
     pub fn run(self) -> Result<Vec<Vec<u8>>> {
+        #[cfg(feature = "kernel")]
+        if let backend::Backend::Kernel(_) = backend::backend() {
+            return self
+                .items
+                .iter()
+                .map(|&(addr, len)| self.proc.read_vec(addr, len))
+                .collect();
+        }
         const IOV_MAX: usize = 1024;
         let mut bufs: Vec<Vec<u8>> = self.items.iter().map(|&(_, len)| vec![0u8; len]).collect();
 
