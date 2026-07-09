@@ -485,14 +485,6 @@ impl Process {
 // ---------------------------------------------------------------------------
 
 impl Process {
-    fn classify(&self, addr: usize, len: usize, errno: i32) -> Error {
-        match errno {
-            libc::EPERM | libc::EACCES => Error::Permission { pid: self.pid },
-            libc::EFAULT | libc::ENOMEM | libc::EIO => Error::Unmapped { addr, len },
-            other => Error::Io(std::io::Error::from_raw_os_error(other)),
-        }
-    }
-
     /// Read `buf.len()` bytes from `addr` into `buf`.
     ///
     /// Uses `process_vm_readv` — one syscall, no `ptrace`-stop. Reading zero
@@ -531,7 +523,7 @@ impl Process {
         // local one is uniquely borrowed for the duration of the call.
         let n = unsafe { libc::process_vm_readv(self.pid, &local, 1, &remote, 1, 0) };
         if n < 0 {
-            return Err(self.classify(addr, buf.len(), errno()));
+            return Err(classify(self.pid, addr, buf.len(), errno()));
         }
         if n as usize != buf.len() {
             return Err(Error::Partial {
@@ -549,6 +541,10 @@ impl Process {
     /// (e.g. `.text`); use [`write_force`](Self::write_force) or
     /// [`write_bytes_mem`](Self::write_bytes_mem) for those. Writing zero bytes
     /// always succeeds.
+    ///
+    /// **Kernel backend:** under the `kernel` feature with `/dev/vmem` active,
+    /// this routes through the driver, which *can* write read-only pages. Do
+    /// not rely on a read-only rejection here when that backend may be selected.
     ///
     /// # Errors
     /// [`Error::Permission`] if `ptrace` access is denied, [`Error::Unmapped`]
@@ -581,7 +577,7 @@ impl Process {
         // SAFETY: see read_bytes; the local buffer is only read.
         let n = unsafe { libc::process_vm_writev(self.pid, &local, 1, &remote, 1, 0) };
         if n < 0 {
-            return Err(self.classify(addr, buf.len(), errno()));
+            return Err(classify(self.pid, addr, buf.len(), errno()));
         }
         if n as usize != buf.len() {
             return Err(Error::Partial {
@@ -814,8 +810,20 @@ impl Process {
     }
 }
 
+/// Map an OS `errno` from a memory-access syscall or the kernel driver's ioctl
+/// onto the crate's error taxonomy. Shared by both backends so the same failure
+/// yields the same [`Error`] regardless of which path served the request.
 #[inline]
-fn errno() -> i32 {
+pub(crate) fn classify(pid: i32, addr: usize, len: usize, errno: i32) -> Error {
+    match errno {
+        libc::EPERM | libc::EACCES => Error::Permission { pid },
+        libc::EFAULT | libc::ENOMEM | libc::EIO => Error::Unmapped { addr, len },
+        other => Error::Io(std::io::Error::from_raw_os_error(other)),
+    }
+}
+
+#[inline]
+pub(crate) fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
@@ -957,6 +965,10 @@ impl<'p> Scatter<'p> {
     /// Queues larger than `IOV_MAX` (1024) are split across several syscalls
     /// automatically.
     ///
+    /// Under the `kernel` backend there is no batched ioctl, so `run` issues one
+    /// read per slot — correctness is identical, but the single-syscall win does
+    /// not apply.
+    ///
     /// # Errors
     /// [`Error::Permission`], [`Error::Unmapped`], [`Error::Partial`], or
     /// [`Error::Io`] — reported against the first address of the failing chunk.
@@ -1008,7 +1020,7 @@ impl<'p> Scatter<'p> {
             };
             if n < 0 {
                 let (addr, len) = self.items[chunk_start];
-                return Err(self.proc.classify(addr, len, errno()));
+                return Err(classify(self.proc.pid, addr, len, errno()));
             }
             if n as usize != want {
                 let (addr, _) = self.items[chunk_start];
@@ -1869,5 +1881,35 @@ mod tests {
             assert!(all.contains(&(addr + o)), "missing needle at +{o:#x}");
         }
         assert_eq!(me.scan_region(&region, &pat).unwrap(), all.first().copied());
+    }
+
+    #[test]
+    fn classify_maps_errno_to_error() {
+        assert!(matches!(
+            classify(7, 0, 0, libc::EPERM),
+            Error::Permission { pid: 7 }
+        ));
+        assert!(matches!(
+            classify(7, 0, 0, libc::EACCES),
+            Error::Permission { pid: 7 }
+        ));
+        assert!(matches!(
+            classify(0, 0x1000, 16, libc::EFAULT),
+            Error::Unmapped {
+                addr: 0x1000,
+                len: 16
+            }
+        ));
+        assert!(matches!(
+            classify(0, 0, 0, libc::EIO),
+            Error::Unmapped { .. }
+        ));
+        assert!(matches!(
+            classify(0, 0, 0, libc::ENOMEM),
+            Error::Unmapped { .. }
+        ));
+        // ESRCH is deliberately NOT Unmapped — it falls through to Io, matching
+        // the syscall path so both backends classify an errno identically.
+        assert!(matches!(classify(0, 0, 0, libc::ESRCH), Error::Io(_)));
     }
 }

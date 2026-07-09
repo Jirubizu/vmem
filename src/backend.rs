@@ -43,7 +43,20 @@ fn select() -> Backend {
         }
         _ => {}
     }
-    KernelDriver::open(DEV)
-        .map(Backend::Kernel)
-        .unwrap_or(Backend::Syscall)
+    // Auto-detection default. The crate's own unit tests validate
+    // backend-independent logic against self-memory, so under `cfg(test)` the
+    // auto path stays on syscalls: a kernel module that merely happens to be
+    // loaded on the build host cannot reroute (and destabilize) them. An
+    // explicit `VMEM_BACKEND=kernel` still opts in above; the kernel path is
+    // exercised by `examples/kernel_ab`.
+    #[cfg(test)]
+    {
+        Backend::Syscall
+    }
+    #[cfg(not(test))]
+    {
+        KernelDriver::open(DEV)
+            .map(Backend::Kernel)
+            .unwrap_or(Backend::Syscall)
+    }
 }

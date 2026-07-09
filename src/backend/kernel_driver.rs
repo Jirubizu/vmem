@@ -6,7 +6,7 @@
 use std::fs::{File, OpenOptions};
 use std::os::fd::AsRawFd;
 
-use crate::{Error, Result};
+use crate::{Error, Result, classify, errno};
 
 /// ioctl request payload. `#[repr(C)]`; field order and size are the ABI.
 #[repr(C)]
@@ -102,16 +102,15 @@ impl KernelDriver {
     }
 }
 
-/// Map a kernel `errno` onto the crate's `Error`, matching `Process::classify`
-/// (`src/lib.rs`) so callers cannot tell the backends apart.
-fn classify(pid: i32, addr: usize, len: usize, e: i32) -> Error {
-    match e {
-        libc::EPERM | libc::EACCES => Error::Permission { pid },
-        libc::EFAULT | libc::ENOMEM | libc::EIO | libc::ESRCH => Error::Unmapped { addr, len },
-        other => Error::Io(std::io::Error::from_raw_os_error(other)),
-    }
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-fn errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+    #[test]
+    fn vmem_rw_abi_constant_is_stable() {
+        // Pins the ioctl number and payload size against silent ABI drift; the
+        // kernel module MUST use the same _IOWR('V', 0, struct vmem_io).
+        assert_eq!(std::mem::size_of::<VmemIo>(), 32);
+        assert_eq!(VMEM_RW, 0xC020_5600);
+    }
 }
