@@ -399,12 +399,14 @@ mod tests {
         let at = 40_000;
         data[at..at + needle.len()].copy_from_slice(&needle);
         let addr = data.as_ptr() as usize;
-        let region = me
-            .maps()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.start <= addr && addr + data.len() <= r.end)
-            .expect("a mapped region containing the buffer");
+        // Bound the region to exactly the buffer we control, so the scan never
+        // reads unrelated self-memory that other test threads mutate in parallel.
+        let region = MapRegion {
+            start: addr,
+            end: addr + data.len(),
+            perms: "rw-p".into(),
+            path: None,
+        };
         let pat = Pattern::parse("11 22 33 44 55 66 77 88").unwrap();
         let all = me.scan_region_all(&region, &pat).unwrap();
         assert!(all.contains(&(addr + at)));
@@ -426,12 +428,14 @@ mod tests {
             data[o..o + needle.len()].copy_from_slice(&needle);
         }
         let addr = data.as_ptr() as usize;
-        let region = me
-            .maps()
-            .unwrap()
-            .into_iter()
-            .find(|r| r.start <= addr && addr + size <= r.end)
-            .expect("a mapped region containing the buffer");
+        // Bounded to the buffer (see scan_region_finds_known_needle) for a
+        // deterministic multi-chunk scan under parallel test execution.
+        let region = MapRegion {
+            start: addr,
+            end: addr + size,
+            perms: "rw-p".into(),
+            path: None,
+        };
         let pat = Pattern::parse("11 22 33 44 55 66 77 88").unwrap();
         let all = me.scan_region_all(&region, &pat).unwrap();
         for &o in &offsets {
