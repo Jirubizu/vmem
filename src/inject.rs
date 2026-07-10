@@ -14,7 +14,7 @@
 
 use std::ffi::c_void;
 
-use crate::{Error, Patch, Process, Result};
+use crate::{Error, Patch, Process, Result, errno};
 
 const SYS_MMAP: u64 = 9;
 const SYS_MUNMAP: u64 = 11;
@@ -163,11 +163,6 @@ impl Drop for Tracer {
         let null = std::ptr::null_mut::<c_void>();
         unsafe { raw_ptrace(libc::PTRACE_DETACH, self.pid, null, null) };
     }
-}
-
-#[inline]
-fn errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
 
 /// A region allocated inside the target process.
