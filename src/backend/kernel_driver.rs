@@ -29,6 +29,21 @@ const VMEM_RW: libc::c_ulong = iowr(0, std::mem::size_of::<VmemIo>());
 /// cap, so a single request never allocates an unbounded kernel bounce buffer.
 const MAX_LEN: usize = 1 << 20;
 
+/// Direction of a `VMEM_RW` transfer — replaces a bare `write: bool` at the
+/// call sites so `read`/`write` read as intent, not a boolean flag.
+#[derive(Clone, Copy)]
+enum Direction {
+    Read,
+    Write,
+}
+
+impl Direction {
+    /// The ABI `write` flag: `1` for a write op, `0` for a read.
+    fn is_write(self) -> bool {
+        matches!(self, Direction::Write)
+    }
+}
+
 /// An open handle to the `/dev/vmem` char device.
 pub(crate) struct KernelDriver {
     file: File,
@@ -43,10 +58,10 @@ impl KernelDriver {
     }
 
     /// One `VMEM_RW` ioctl over a `<= MAX_LEN` slice. Returns bytes moved.
-    fn ioctl_once(&self, pid: i32, addr: usize, ptr: *mut u8, len: usize, write: bool) -> isize {
+    fn ioctl_once(&self, pid: i32, addr: usize, ptr: *mut u8, len: usize, dir: Direction) -> isize {
         let mut req = VmemIo {
             pid,
-            write: u32::from(write),
+            write: u32::from(dir.is_write()),
             addr: addr as u64,
             len: len as u64,
             ubuf: ptr as u64,
@@ -60,13 +75,13 @@ impl KernelDriver {
     /// Transfer `len` bytes, chunking at `MAX_LEN`. Mirrors the syscall path's
     /// error contract: [`Error::Partial`] once any bytes have moved, otherwise
     /// a classified error.
-    fn rw(&self, pid: i32, addr: usize, ptr: *mut u8, len: usize, write: bool) -> Result<()> {
+    fn rw(&self, pid: i32, addr: usize, ptr: *mut u8, len: usize, dir: Direction) -> Result<()> {
         let mut done = 0usize;
         while done < len {
             let chunk = (len - done).min(MAX_LEN);
             // SAFETY: `done < len` and the buffer is valid for `len` bytes, so
             // `ptr + done` stays in bounds.
-            let n = self.ioctl_once(pid, addr + done, unsafe { ptr.add(done) }, chunk, write);
+            let n = self.ioctl_once(pid, addr + done, unsafe { ptr.add(done) }, chunk, dir);
             if n < 0 {
                 if done > 0 {
                     return Err(Error::Partial {
@@ -92,13 +107,19 @@ impl KernelDriver {
 
     /// Read `buf.len()` bytes from the target's `addr` into `buf`.
     pub(crate) fn read(&self, pid: i32, addr: usize, buf: &mut [u8]) -> Result<()> {
-        self.rw(pid, addr, buf.as_mut_ptr(), buf.len(), false)
+        self.rw(pid, addr, buf.as_mut_ptr(), buf.len(), Direction::Read)
     }
 
     /// Write `buf` to the target's `addr` (read-only pages included).
     pub(crate) fn write(&self, pid: i32, addr: usize, buf: &[u8]) -> Result<()> {
         // The module only reads from this buffer on a write op.
-        self.rw(pid, addr, buf.as_ptr().cast_mut(), buf.len(), true)
+        self.rw(
+            pid,
+            addr,
+            buf.as_ptr().cast_mut(),
+            buf.len(),
+            Direction::Write,
+        )
     }
 }
 
