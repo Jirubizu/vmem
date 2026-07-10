@@ -15,8 +15,8 @@ impl Pattern {
     /// `??`, `?`, `**`, or `*` for a wildcard byte.
     ///
     /// # Errors
-    /// [`Error::Io`] (`InvalidInput`) if a token is neither a wildcard nor a
-    /// valid two-digit hex byte.
+    /// [`Error::InvalidPattern`] if a token is neither a wildcard nor a valid
+    /// two-digit hex byte.
     ///
     /// # Examples
     /// ```
@@ -31,12 +31,8 @@ impl Pattern {
             if matches!(tok, "??" | "?" | "**" | "*") {
                 bytes.push(None);
             } else {
-                let b = u8::from_str_radix(tok, 16).map_err(|_| {
-                    Error::Io(std::io::Error::new(
-                        std::io::ErrorKind::InvalidInput,
-                        format!("bad pattern token '{tok}'"),
-                    ))
-                })?;
+                let b = u8::from_str_radix(tok, 16)
+                    .map_err(|_| Error::InvalidPattern(format!("bad token '{tok}'")))?;
                 bytes.push(Some(b));
             }
         }
@@ -50,7 +46,7 @@ impl Pattern {
     /// placeholder byte in `bytes` is ignored.
     ///
     /// # Errors
-    /// [`Error::Io`] (`InvalidInput`) if `bytes` and `mask` differ in length.
+    /// [`Error::InvalidPattern`] if `bytes` and `mask` differ in length.
     ///
     /// # Examples
     /// ```
@@ -61,10 +57,9 @@ impl Pattern {
     /// ```
     pub fn from_mask(bytes: &[u8], mask: &str) -> Result<Self> {
         if bytes.len() != mask.len() {
-            return Err(Error::Io(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "pattern and mask differ in length",
-            )));
+            return Err(Error::InvalidPattern(
+                "pattern and mask differ in length".into(),
+            ));
         }
         Ok(Pattern(
             bytes
@@ -378,7 +373,14 @@ mod tests {
 
     #[test]
     fn pattern_parse_rejects_bad_token() {
-        assert!(Pattern::parse("48 ZZ").is_err());
+        assert!(matches!(
+            Pattern::parse("48 ZZ"),
+            Err(Error::InvalidPattern(_))
+        ));
+        assert!(matches!(
+            Pattern::from_mask(b"\x48", "xx"),
+            Err(Error::InvalidPattern(_))
+        ));
     }
 
     #[test]

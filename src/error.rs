@@ -56,6 +56,12 @@ pub enum Error {
     #[error("pattern '{0}' not found")]
     PatternNotFound(String),
 
+    /// A signature or mask string was malformed: a bad hex token in
+    /// [`Pattern::parse`](crate::Pattern::parse), or a pattern/mask length
+    /// mismatch in [`Pattern::from_mask`](crate::Pattern::from_mask).
+    #[error("invalid pattern: {0}")]
+    InvalidPattern(String),
+
     /// A `rel32` relative branch cannot reach its target (> ±2 GiB); use an
     /// absolute jump instead.
     #[error("rel32 from {from:#x} to {to:#x} is out of range; use an absolute jmp")]
