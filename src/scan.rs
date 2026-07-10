@@ -64,8 +64,14 @@ impl Pattern {
         Ok(Pattern(
             bytes
                 .iter()
-                .zip(mask.chars())
-                .map(|(&b, m)| if m == 'x' || m == 'X' { Some(b) } else { None })
+                .zip(mask.bytes())
+                .map(|(&b, m)| {
+                    if m == b'x' || m == b'X' {
+                        Some(b)
+                    } else {
+                        None
+                    }
+                })
                 .collect(),
         ))
     }
